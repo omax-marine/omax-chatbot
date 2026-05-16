@@ -126,7 +126,7 @@ app.post('/api/chat', async function(req, res) {
     var msgs = history.slice(-14).map(function(m) { return { role: m.role, content: typeof m.content === 'string' ? m.content : '' }; });
     msgs.push({ role: 'user', content: message });
 
-    var response = await anthropic.messages.create({ model: 'claude-sonnet-4-20250514', max_tokens: 1024, system: SYSTEM_PROMPT + ctx, messages: msgs });
+    var response = await anthropic.messages.create({ model: 'claude-haiku-4-5-20251001', max_tokens: 1024, system: SYSTEM_PROMPT + ctx, messages: msgs });
     var reply = response.content.filter(function(c) { return c.type === 'text'; }).map(function(c) { return c.text; }).join('');
 
     res.json({
