@@ -15,7 +15,6 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-const Anthropic = require('@anthropic-ai/sdk').default;
 const fs = require('fs');
 const path = require('path');
 
@@ -33,6 +32,14 @@ if (!API_KEY || API_KEY.includes('VOTRE_CLE')) {
 }
 
 // ── Anthropic Client ──
+let Anthropic;
+try {
+  const sdk = require('@anthropic-ai/sdk');
+  Anthropic = sdk.default || sdk.Anthropic || sdk;
+} catch (e) {
+  console.error('❌ ERREUR: SDK Anthropic non trouvé:', e.message);
+  process.exit(1);
+}
 const anthropic = new Anthropic({ apiKey: API_KEY });
 
 // ── Catalogue ──
