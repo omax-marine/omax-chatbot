@@ -43,8 +43,16 @@ try {
 const anthropic = new Anthropic({ apiKey: API_KEY });
 
 // ── Catalogue ──
-const catalogue = JSON.parse(fs.readFileSync(path.join(__dirname, 'catalogue.json'), 'utf-8'));
-console.log(`📦 Catalogue chargé: ${catalogue.length} produits`);
+let catalogue = [];
+try {
+  const catPath = path.join(__dirname, 'catalogue.json');
+  const raw = fs.readFileSync(catPath, 'utf-8');
+  catalogue = JSON.parse(raw);
+  console.log('📦 Catalogue chargé: ' + catalogue.length + ' produits');
+} catch (e) {
+  console.error('⚠️ Erreur chargement catalogue:', e.message);
+  console.log('Le serveur démarre sans catalogue');
+}
 
 // ── Search ──
 function norm(s) {
