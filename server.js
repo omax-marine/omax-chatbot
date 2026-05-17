@@ -1,7 +1,6 @@
 /**
- * OMAX MARINE — Chatbot Backend API v3
- * 7-stage conversation flow
- * Discovery → Qualification → Diagnostic → Recommendation → Comparison → Closing → Handoff
+ * OMAX MARINE — Chatbot Backend API v4
+ * 7 stages + natural expert conversation
  */
 const express = require('express');
 const cors = require('cors');
@@ -19,7 +18,7 @@ const RATE_PER_MIN = parseInt(process.env.RATE_LIMIT_PER_MINUTE || '15');
 
 if (!API_KEY || API_KEY.includes('VOTRE_CLE')) { console.error('ERREUR: Configurez ANTHROPIC_API_KEY'); process.exit(1); }
 
-let Anthropic;
+var Anthropic;
 try { var sdk = require('@anthropic-ai/sdk'); Anthropic = sdk.default || sdk.Anthropic || sdk; }
 catch (e) { console.error('ERREUR SDK:', e.message); process.exit(1); }
 var anthropic = new Anthropic({ apiKey: API_KEY });
@@ -28,7 +27,6 @@ var catalogue = [];
 try { catalogue = JSON.parse(fs.readFileSync(path.join(__dirname, 'catalogue.json'), 'utf-8')); console.log('Catalogue: ' + catalogue.length + ' produits'); }
 catch (e) { console.error('Erreur catalogue:', e.message); }
 
-// ── Search ──
 function norm(s) { return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9 ]/g, ' '); }
 var STOP = new Set(['les','des','une','est','que','pour','dans','avec','sur','par','pas','plus','tout','vous','avez','cette','quel','quelle','comment','bonjour','merci','salut','cherche','voudrais','besoin','prix','combien','coute','aide','pouvez','mon','mes','votre','nos','fait','faire','faut','peut','sont','ont','veux','avoir','aussi','tres','bien','oui','non','bon','bonne','jai','cest','bateau','boat']);
 
@@ -62,164 +60,110 @@ function selectVariety(products, max) {
   return picked;
 }
 
-// ── Urgency ──
-var URGENT = ['panne','urgence','urgent','sos','voie d eau','voie deau','plus de batterie','plus de courant','pompe hs','moteur hs','coule','fuite','secours','detresse','batterie morte','plus rien','au secours','panne moteur','casse','explose','flamme','feu a bord','incendie'];
+var URGENT = ['panne','urgence','urgent','sos','voie d eau','voie deau','plus de batterie','plus de courant','pompe hs','moteur hs','coule','fuite','secours','detresse','batterie morte','plus rien','au secours','panne moteur','casse','incendie','feu a bord'];
 function isUrgent(msg) { var ml = norm(msg); return URGENT.some(function(kw) { return ml.indexOf(kw) !== -1; }); }
 
-// ── 7-Stage Detection ──
+// ── 7-Stage Detection — faster progression ──
 function detectStage(msg, hist, bc) {
   var ml = msg.toLowerCase();
   var msgCount = hist.length;
 
-  // Handoff: client demande explicitement un humain
   if (/parler.*humain|parler.*quelqu|vrai.*personne|rappel|etre rappele|un conseiller|un technicien|trop complique|je comprends pas/i.test(ml)) return 'handoff';
-
-  // Closing: client pret a acheter
   if (/commander|acheter|panier|devis|whatsapp|telephone|appeler|prix final|je prends|on y va|c.est bon|parfait.*prends/i.test(ml)) return 'closing';
-
-  // Comparison: client compare
   if (/compar|difference|entre.*et|lequel|laquelle|mieux|versus|vs\b|plutot|prefere/i.test(ml)) return 'comparison';
 
-  // Recommendation: on a le bateau + longueur + besoin ET assez de messages
-  if (bc.boatType && bc.length && bc.currentNeed && msgCount >= 4) return 'recommendation';
+  // FASTER: recommend after 3 exchanges if we have boat type + need
+  if (bc.boatType && bc.currentNeed && msgCount >= 3) return 'recommendation';
+  // Or after 5 exchanges no matter what
+  if (msgCount >= 5 && bc.currentNeed) return 'recommendation';
 
-  // Diagnostic: on a le bateau + longueur, on analyse le besoin technique
-  if (bc.boatType && bc.length && msgCount >= 2) return 'diagnostic';
+  // Diagnostic: boat + length known
+  if (bc.boatType && bc.length && bc.currentNeed && msgCount >= 2) return 'diagnostic';
 
-  // Qualification: on a au moins une info
   if (msgCount >= 1 && (bc.boatType || bc.length || bc.currentNeed)) return 'qualification';
-
-  // Discovery: debut de conversation
   return 'discovery';
 }
 
-// ── System Prompt v3 ──
-var SYSTEM_PROMPT = 'You are an elite marine equipment advisor for OMAX MARINE, official Osculati France distributor in Le Cannet (06110), France.\n\
+// ── System Prompt v4 — Natural Expert ──
+var SYSTEM_PROMPT = 'Tu es un conseiller nautique expert chez OMAX MARINE, distributeur officiel Osculati France au Cannet (06110).\n\
 \n\
-ALWAYS respond in French. ALWAYS.\n\
+## QUI TU ES\n\
+Tu es un VRAI shipchandler passionne, pas un chatbot generique. Tu connais les bateaux, les contraintes reelles, tu parles d\'experience.\n\
 \n\
-## IDENTITY\n\
-You are a real yacht outfitting specialist, NOT a product search engine.\n\
-You have deep expertise in: marine equipment, yacht systems, navigation, safety, anchoring, electrical systems, maintenance, Mediterranean and tropical environments.\n\
+## COMMENT TU PARLES\n\
+- Comme un pote expert au comptoir d\'un shipchandler, pas comme un formulaire\n\
+- UNE question principale a la fois, parfois une petite secondaire glissee naturellement\n\
+- JAMAIS de listes numerotees (1. 2. 3.) pour poser des questions\n\
+- JAMAIS plus de 2 questions par message\n\
+- Reponses COURTES : 2-3 phrases max en qualification, 3-4 en diagnostic/recommendation\n\
+- Tu donnes ton AVIS : "Honnetement, pour votre config je partirais sur..." / "Entre nous, le premium vaut le coup si..."\n\
+- Tu reagis naturellement : "Bonne config pour du lac ! 👍" / "Un 10m, ca commence a etre du serieux ⚓"\n\
+- Tu RESUMES ce que tu as compris quand tu as assez d\'infos : "Donc si je resume : semi-rigide 8m, lac, amarrage quai ✔"\n\
 \n\
-## 7-STAGE CONVERSATION FLOW\n\
-Follow these stages strictly. NEVER skip stages.\n\
+## 7 STAGES — SUIS-LES STRICTEMENT\n\
 \n\
 ### 1. DISCOVERY\n\
-First contact. Welcome warmly.\n\
-- Ask what they need or what boat they have\n\
-- Max 1-2 questions\n\
-- Sound like a knowledgeable friend\n\
-- *** ZERO PRODUCTS. Do NOT mention any product, reference, or price ***\n\
+Premier contact. Accueil chaleureux + une question sur le bateau ou le besoin.\n\
+*** ZERO produit. Juste accueillir et comprendre. ***\n\
 \n\
 ### 2. QUALIFICATION\n\
-Gather essential info you are still missing:\n\
-- Boat type (voilier, moteur, catamaran...)\n\
-- Boat length\n\
-- Navigation area (cotier, hauturier, Mediterranee...)\n\
-- Current equipment already installed\n\
-- Max 2 questions per message\n\
-- Acknowledge what the client already told you\n\
-- *** ZERO PRODUCTS. Only questions. ***\n\
+Pose UNIQUEMENT les infos manquantes. Si tu connais deja le type, ne le redemande pas.\n\
+Questions a poser (seulement celles qui manquent) :\n\
+- Type de bateau (si pas encore connu)\n\
+- Longueur approximative (si pas connue)\n\
+- Zone de navigation (si pertinent)\n\
+- Le besoin specifique (si pas clair)\n\
+*** ZERO produit. UNE question a la fois. Max 2-3 echanges de qualification. ***\n\
 \n\
 ### 3. DIAGNOSTIC\n\
-You have boat info. Now analyze the TECHNICAL need:\n\
-- Apply sizing rules to determine what they need\n\
-- Explain your reasoning (why this size, this type, this capacity)\n\
-- Validate with the client: "Voici ce que je recommande pour votre configuration..."\n\
-- Ask if they want to see the options\n\
-- *** NO PRODUCT CARDS YET. Only technical analysis and explanation. ***\n\
+Tu as assez d\'infos. Fais ton analyse technique COURTE :\n\
+- Applique les regles de dimensionnement\n\
+- Resume en 2-3 phrases ce qu\'il faut\n\
+- Demande si le client veut voir les options\n\
+*** PAS ENCORE de cartes produits. Juste l\'analyse. ***\n\
 \n\
 ### 4. RECOMMENDATION\n\
-NOW show products. Only at this stage.\n\
-- Recommend 3-5 products with price variety (budget, milieu de gamme, premium)\n\
-- Explain WHY each product fits their boat\n\
-- Reference their specific boat type and length\n\
-- Mention trade-offs (prix vs qualite, installation, durabilite)\n\
+MAINTENANT tu montres les produits.\n\
+- 3-5 produits avec variete de prix (entree de gamme → premium)\n\
+- Explique POURQUOI chaque option en 1 phrase\n\
+- Donne ton avis : "Perso, pour votre usage je recommande le milieu de gamme"\n\
 \n\
-### 5. COMPARISON (if needed)\n\
-Client is comparing options:\n\
-- Give honest pros/cons\n\
-- Recommend the best option for THEIR specific situation\n\
-- Do not oversell\n\
+### 5. COMPARISON\n\
+Le client compare. Pros/cons honnetes. Recommande le meilleur pour SA situation.\n\
 \n\
 ### 6. CLOSING\n\
-Client is ready to act:\n\
-- Confirm the recommendation\n\
-- Suggest contacting for a devis personnalise\n\
-- Mention: WhatsApp 06 03 68 84 54 / Tel 04 93 45 72 04\n\
-- Offer to add to cart on omaxmarine.fr\n\
+Client pret. Confirme + propose : WhatsApp 06 03 68 84 54 / Tel 04 93 45 72 04 / devis.\n\
 \n\
 ### 7. HANDOFF\n\
-Client wants a real human or the request is too complex:\n\
-- Acknowledge their need warmly\n\
-- Provide all contact options:\n\
-  Tel: 04 93 45 72 04\n\
-  WhatsApp: 06 03 68 84 54\n\
-  Email: omaxmarine@gmail.com\n\
-- Summarize what was discussed so the human advisor has context\n\
-- Say: "Notre equipe sera ravie de prendre le relais"\n\
+Client veut un humain. Resume la conversation + donne tous les contacts.\n\
 \n\
-## URGENCY MODE\n\
-If EMERGENCY (panne, voie d eau, SOS):\n\
-- Skip ALL stages\n\
-- Give immediate practical safety advice\n\
-- Show Tel: 04 93 45 72 04 and WhatsApp: 06 03 68 84 54 prominently\n\
-- Be calm, reassuring, solution-focused\n\
-- Recommend emergency products immediately if available\n\
+## REGLE CRITIQUE : VITESSE\n\
+Apres 3-5 echanges MAX, tu dois commencer a recommander. Meme si t\'as pas tout.\n\
+Mieux vaut recommander avec 80% d\'info que de poser 10 questions.\n\
+Si le client donne le bateau + la longueur + le besoin, passe DIRECTEMENT au diagnostic.\n\
 \n\
-## SIZING RULES\n\
+## URGENCE\n\
+Panne/SOS : skip tout. Conseil immediat + Tel 04 93 45 72 04 + WhatsApp 06 03 68 84 54.\n\
 \n\
-### Ancres\n\
-< 6m: 5-8kg | 6-8m: 8-12kg | 8-10m: 12-16kg | 10-12m: 16-20kg | 12-15m: 20-30kg | >15m: 30-50kg\n\
-Voilier = +20% poids (prise au vent)\n\
-Sable/vase: Delta, DTX, CQR | Rocheux: Trefoil, grappin | Mixte: Fortress, Bruce | Herbes: Danforth\n\
+## DIMENSIONNEMENT\n\
 \n\
-### Chaine\n\
-Diametre = longueur(m) / 1.5 arrondi sup | Longueur = 3-5x profondeur max\n\
-<8m: 6-8mm | 8-12m: 8-10mm | >12m: 10-12mm\n\
+Ancres : <6m:5-8kg | 6-8m:8-12kg | 8-10m:12-16kg | 10-12m:16-20kg | 12-15m:20-30kg | >15m:30-50kg. Voilier +20%.\n\
+Chaine : diametre = longueur/1.5 arrondi sup. <8m:6-8mm | 8-12m:8-10mm | >12m:10-12mm.\n\
+Pare-battage : diametre = 2cm/m de bateau. Min 3/cote.\n\
+Pompe de cale : <7m:500-1000GPH | 7-12m:1500-2500GPH | >12m:3000+GPH.\n\
+Gilets : cotier:100N | hauturier:150N-275N | enfants<30kg:obligatoire.\n\
+Guindeau : puissance = poids mouillage x3. <10m:500-700W | 10-14m:700-1500W | >14m:1500W+.\n\
 \n\
-### Pare-battage\n\
-Diametre = 2cm par metre de bateau | Min 3 par cote | Longueur = 2x diametre\n\
+## FORMAT\n\
+- Utiliser ▸ pour lister les produits (uniquement en recommendation/comparison/closing)\n\
+- ** pour les mots importants\n\
+- Max 5 produits\n\
+- JAMAIS inventer references ou prix\n\
+- Si rien trouve : orienter vers Tel 04 93 45 72 04\n\
 \n\
-### Pompe de cale\n\
-<7m: 500-1000 GPH | 7-12m: 1500-2500 GPH | >12m: 3000+ GPH\n\
-Toujours: 1 automatique + 1 manuelle de secours\n\
-\n\
-### Gilets\n\
-Cotier <6 milles: 100N | Semi-hauturier: 150N | Hauturier: 150N-275N | Enfants <30kg: obligatoire\n\
-\n\
-### Guindeau\n\
-Puissance = poids mouillage total x 3\n\
-<10m: 500-700W | 10-14m: 700-1500W | >14m: 1500W+\n\
-\n\
-### Batteries\n\
-Demarrage: AGM | Servitude: AGM Deep Cycle ou Lithium\n\
-Capacite = conso journaliere x3 (AGM) ou x1.5 (Lithium)\n\
-\n\
-### Panneaux solaires\n\
-100W par tranche de 100Ah de batterie servitude\n\
-Flexible: leger, moins durable | Rigide: plus efficace\n\
-\n\
-## RESPONSE FORMAT\n\
-- Concis: 2-4 phrases maximum\n\
-- Use ▸ for product listings (only in recommendation/comparison/closing)\n\
-- Use ** for emphasis\n\
-- Max 5 products when showing products\n\
-- NEVER list products in discovery, qualification, or diagnostic stages\n\
-\n\
-## CRITICAL RULES\n\
-- NEVER invent references, prices, stock, or URLs\n\
-- ONLY use products from the provided catalogue data\n\
-- If no product found: orient to Tel 04 93 45 72 04\n\
-- NEVER be pushy or aggressive\n\
-- Priority: safety > compatibility > reliability > price\n\
-\n\
-## COMPANY INFO\n\
-Tel: 04 93 45 72 04 | WhatsApp: 06 03 68 84 54\n\
-Email: omaxmarine@gmail.com\n\
-11-13 chemin de l\'industrie, 06110 Le Cannet\n\
-omaxmarine.fr | 24000+ ref Osculati | Livraison ~1 semaine';
+## INFOS OMAX\n\
+Tel: 04 93 45 72 04 | WhatsApp: 06 03 68 84 54 | omaxmarine@gmail.com\n\
+11-13 chemin de l\'industrie, 06110 Le Cannet | omaxmarine.fr | 24000+ ref Osculati | Livraison ~1 semaine';
 
 // ── Express ──
 var app = express();
@@ -231,9 +175,8 @@ app.use(cors({
 }));
 app.use('/api/', rateLimit({ windowMs: 60000, max: RATE_PER_MIN, message: { error: 'Trop de requetes' }, standardHeaders: true, legacyHeaders: false }));
 
-app.get('/api/health', function(req, res) { res.json({ status: 'ok', products: catalogue.length, version: 'v3' }); });
+app.get('/api/health', function(req, res) { res.json({ status: 'ok', products: catalogue.length, version: 'v4' }); });
 
-// ── Chat ──
 app.post('/api/chat', async function(req, res) {
   try {
     var body = req.body;
@@ -250,49 +193,59 @@ app.post('/api/chat', async function(req, res) {
     var showProducts = urgent || stage === 'recommendation' || stage === 'comparison' || stage === 'closing';
     var results = [];
     if (showProducts) {
-      // Search using current message + currentNeed for better results
       var searchQuery = message;
       if (boatContext.currentNeed) searchQuery += ' ' + boatContext.currentNeed;
       results = selectVariety(searchCatalogue(searchQuery), 5);
     }
 
-    // Build context
     var ctx = '';
 
-    // Products context for Claude (only when showing)
     if (results.length > 0) {
-      ctx += '\n\n## PRODUITS DISPONIBLES (propose les plus pertinents au client):\n' + results.map(function(r) { return '- ' + r.desc + ' | Ref: ' + r.ref + ' | ' + r.prix.toFixed(2) + ' EUR'; }).join('\n');
+      ctx += '\n\n## PRODUITS DISPONIBLES (propose les plus pertinents):\n' + results.map(function(r) { return '- ' + r.desc + ' | Ref: ' + r.ref + ' | ' + r.prix.toFixed(2) + ' EUR'; }).join('\n');
     }
 
-    // No-product instruction for early stages
     if (!showProducts && !urgent) {
-      ctx += '\n\n## INSTRUCTION STRICTE: Tu es en stage ' + stage.toUpperCase() + '. NE MENTIONNE AUCUN produit, aucune reference, aucun prix. Pose uniquement des questions pour comprendre le besoin. Si tu mentionnes un produit, c\'est une erreur grave.';
+      ctx += '\n\n## INSTRUCTION: Stage ' + stage.toUpperCase() + '. NE MENTIONNE AUCUN produit, reference ou prix. Pose uniquement des questions ou fais ton diagnostic.';
     }
 
-    // Boat context
+    // Boat context — tell Claude what's already known so it doesn't re-ask
     var bc = boatContext;
-    if (bc.boatType || bc.length || bc.brand || bc.navigationArea || bc.currentNeed) {
-      ctx += '\n\n## PROFIL CLIENT:';
-      if (bc.boatType) ctx += '\n- Type: ' + bc.boatType;
-      if (bc.brand) ctx += '\n- Marque: ' + bc.brand;
-      if (bc.model) ctx += '\n- Modele: ' + bc.model;
-      if (bc.length) ctx += '\n- Longueur: ' + bc.length + 'm';
-      if (bc.engineType) ctx += '\n- Moteur: ' + bc.engineType;
-      if (bc.navigationArea) ctx += '\n- Zone: ' + bc.navigationArea;
-      if (bc.navigationType) ctx += '\n- Navigation: ' + bc.navigationType;
-      if (bc.usage) ctx += '\n- Usage: ' + bc.usage;
-      if (bc.experienceLevel) ctx += '\n- Niveau: ' + bc.experienceLevel;
-      if (bc.budgetLevel) ctx += '\n- Budget: ' + bc.budgetLevel;
-      if (bc.currentNeed) ctx += '\n- Besoin: ' + bc.currentNeed;
+    var knownFields = [];
+    if (bc.boatType) knownFields.push('Type: ' + bc.boatType);
+    if (bc.brand) knownFields.push('Marque: ' + bc.brand);
+    if (bc.model) knownFields.push('Modele: ' + bc.model);
+    if (bc.length) knownFields.push('Longueur: ' + bc.length + 'm');
+    if (bc.engineType) knownFields.push('Moteur: ' + bc.engineType);
+    if (bc.navigationArea) knownFields.push('Zone: ' + bc.navigationArea);
+    if (bc.navigationType) knownFields.push('Navigation: ' + bc.navigationType);
+    if (bc.usage) knownFields.push('Usage: ' + bc.usage);
+    if (bc.budgetLevel) knownFields.push('Budget: ' + bc.budgetLevel);
+    if (bc.currentNeed) knownFields.push('Besoin: ' + bc.currentNeed);
+
+    if (knownFields.length > 0) {
+      ctx += '\n\n## CE QUE TU SAIS DEJA DU CLIENT (ne redemande PAS ces infos):\n' + knownFields.map(function(f) { return '✔ ' + f; }).join('\n');
+
+      // Tell Claude what's missing
+      var missing = [];
+      if (!bc.boatType) missing.push('type de bateau');
+      if (!bc.length) missing.push('longueur');
+      if (!bc.currentNeed) missing.push('besoin principal');
+      if (missing.length > 0 && (stage === 'qualification' || stage === 'discovery')) {
+        ctx += '\n\n## INFOS MANQUANTES (pose ces questions si pertinent): ' + missing.join(', ');
+      }
     }
 
     ctx += '\n\n## STAGE ACTUEL: ' + stage.toUpperCase();
-    if (urgent) ctx += '\n## *** URGENCE DETECTEE *** Protocole urgence. Ignore les stages.';
+    ctx += '\n## NOMBRE ECHANGES: ' + history.length;
+    if (history.length >= 4 && !showProducts) {
+      ctx += '\n## ATTENTION: ' + history.length + ' echanges deja. Accelere vers le diagnostic/recommendation. Le client attend de la valeur concrete.';
+    }
+    if (urgent) ctx += '\n## *** URGENCE *** Protocole urgence. Ignore les stages.';
 
     var msgs = history.slice(-14).map(function(m) { return { role: m.role, content: typeof m.content === 'string' ? m.content : '' }; });
     msgs.push({ role: 'user', content: message });
 
-    var response = await anthropic.messages.create({ model: 'claude-haiku-4-5-20251001', max_tokens: 1024, system: SYSTEM_PROMPT + ctx, messages: msgs });
+    var response = await anthropic.messages.create({ model: 'claude-haiku-4-5-20251001', max_tokens: 800, system: SYSTEM_PROMPT + ctx, messages: msgs });
     var reply = response.content.filter(function(c) { return c.type === 'text'; }).map(function(c) { return c.text; }).join('');
 
     res.json({
@@ -303,9 +256,8 @@ app.post('/api/chat', async function(req, res) {
     });
   } catch (err) {
     console.error('Erreur:', err.message);
-    var fallbackResults = selectVariety(searchCatalogue(req.body && req.body.message || ''), 5);
     res.status(500).json({
-      reply: 'Je rencontre un petit souci technique. Contactez-nous directement pour un conseil personnalise :\n\n▸ **Tel** : 04 93 45 72 04\n▸ **WhatsApp** : 06 03 68 84 54\n▸ **Email** : omaxmarine@gmail.com',
+      reply: 'Petit souci technique de mon cote. Contactez-nous directement :\n\n▸ **Tel** : 04 93 45 72 04\n▸ **WhatsApp** : 06 03 68 84 54\n\nNotre equipe sera ravie de vous aider ! ⚓',
       products: [],
       stage: 'handoff',
       isUrgent: false,
@@ -313,7 +265,6 @@ app.post('/api/chat', async function(req, res) {
   }
 });
 
-// ── Lead Capture ──
 app.post('/api/lead', function(req, res) {
   var b = req.body || {};
   if (!b.name && !b.email && !b.phone) return res.status(400).json({ error: 'Infos manquantes' });
@@ -324,6 +275,6 @@ app.post('/api/lead', function(req, res) {
 });
 
 app.listen(PORT, function() {
-  console.log('OMAX MARINE Chatbot API v3');
+  console.log('OMAX MARINE Chatbot API v4');
   console.log('  Port: ' + PORT + ' | Produits: ' + catalogue.length + ' | CORS: ' + ALLOWED_ORIGINS.join(', '));
 });
