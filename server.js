@@ -159,6 +159,7 @@ Guindeau : puissance = poids mouillage x3. <10m:500-700W | 10-14m:700-1500W | >1
 - ** pour les mots importants\n\
 - Max 5 produits\n\
 - JAMAIS inventer references ou prix\n\
+- JAMAIS inventer de noms de personnes ou d\'employes. Ne mentionne AUCUN prenom. Dis "notre equipe", "nos conseillers", "un expert OMAX".\n\
 - Si rien trouve : orienter vers Tel 04 93 45 72 04\n\
 \n\
 ## INFOS OMAX\n\
